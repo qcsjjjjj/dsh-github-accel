@@ -1,0 +1,58 @@
+{
+  "name": "dsh-github-accel",
+  "version": "0.2.0",
+  "description": "GitHub accelerator for DSH: hosts takeover + per-domain loopback SNI passthrough (no TLS MITM, no certificate install), a local CONNECT proxy, and a PAC fallback. The toggle lives in the session top bar.",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./server/accel.js": "./server/accel.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "client", "server", "cordis.patch.yml", "README.md", "LICENSE"],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "github",
+    "accelerator",
+    "proxy",
+    "sni",
+    "hosts",
+    "sni-passthrough",
+    "china"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qcsjjjjj/dsh-github-accel.git"
+  },
+  "homepage": "https://github.com/qcsjjjjj/dsh-github-accel#readme",
+  "bugs": {
+    "url": "https://github.com/qcsjjjjj/dsh-github-accel/issues"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/accel.test.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "bench": "node tools/bench.mjs",
+    "recover": "node tools/recover.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2 || >=4.0.3-rc.1 <5.0.0-0"
+  }
+}

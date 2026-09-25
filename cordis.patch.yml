@@ -1,0 +1,6 @@
+# dsh bundle patch: registers the GitHub accelerator plugin row.
+# The host half owns the tunnel + hosts block and exposes two local GET routes;
+# the browser half draws the top-bar toggle.
+- insert:
+    - id: dsh-github-accel
+      name: 'dsh-github-accel'

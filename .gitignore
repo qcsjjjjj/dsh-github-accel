@@ -1,0 +1,16 @@
+# 依赖与产物
+node_modules/
+*.tgz
+
+# 勘察脚本的机器相关输出（脚本本身要提交，它生成的数据不要）
+recon/*.json
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
