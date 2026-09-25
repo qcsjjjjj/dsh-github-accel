@@ -29,6 +29,7 @@ import {
   HOT_DOMAINS,
   LOOPBACK_PREFIX,
   OPTIONAL_DOMAINS,
+  OPT_IN_DOMAINS,
   PROXY_ONLY_DOMAINS,
   COALESCING_UNSAFE,
   decideHijackDomains,
@@ -81,6 +82,7 @@ export {
   IP_TTL_MS,
   LOOPBACK_PREFIX,
   OPTIONAL_DOMAINS,
+  OPT_IN_DOMAINS,
   PROXY_ONLY_DOMAINS,
   CandidateTable,
   PacServer,
@@ -185,7 +187,11 @@ export class Accelerator {
     this.allDomains = DOMAIN_TABLE.map((e) => e.domain)
     this.domains = options.domains ?? DEFAULT_DOMAINS
     this.excluded = options.excluded ?? parseList(process.env.DSH_GITHUB_ACCEL_EXCLUDE)
+    /* 自动可选（校验通过就收） vs 显式 opt-in（点名才收）。见 server/domains.js。 */
     this.optional = options.optional ?? OPTIONAL_DOMAINS
+    this.optIn = (options.optIn ?? parseList(process.env.DSH_GITHUB_ACCEL_INCLUDE)).filter((d) =>
+      OPT_IN_DOMAINS.includes(d),
+    )
 
     this.sniPort = options.sniPort ?? DEFAULTS.sniPort
     this.httpPort = options.httpPort ?? DEFAULTS.httpPort
@@ -199,6 +205,17 @@ export class Accelerator {
     })
     /** hosts / 系统代理是不是**这一轮由我们**改的（多实例时决定退出要不要撤）。 */
     this.oursApplied = false
+
+    /*
+     * 持久化开关：**默认关**，只有插件宿主（lib/index.js）会显式打开。
+     *
+     * 为什么必须默认关：状态文件（prefs.json / active.json）与「上次开关」「崩溃哨兵」
+     * 属于**系统级共享资源**，一个进程里只能有一个主人。而测试、doctor、bench、
+     * live-check 都会 `new Accelerator(...)` —— 如果它们随手 `stop()` 一下，
+     * 就会把真插件的 prefs 改成 `enabled:false`（下次 DSH 重启不再自动加速）
+     * 并删掉哨兵（崩溃恢复失去线索）。这是真实踩过的坑，不是假想。
+     */
+    this.persistState = options.persistState === true || process.env.DSH_GITHUB_ACCEL_PERSIST === '1'
 
     this.table = new CandidateTable({
       fallbacks: options.fallbacks ?? FALLBACK_IPS,
@@ -483,8 +500,8 @@ export class Accelerator {
     this.hosts.domains = [...next]
     const applied = this.hosts.apply()
     if (applied.ok) {
-      flushDns()
-      writeState({ pid: process.pid, at: new Date().toISOString(), domains: [...next], addresses: this.hosts.addressMap })
+      this.flushDnsIfOwner()
+      this.saveState({ pid: process.pid, at: new Date().toISOString(), domains: [...next], addresses: this.hosts.addressMap })
     }
   }
 
@@ -508,6 +525,7 @@ export class Accelerator {
    *   - 只是我们自己的条目丢了 → 重写回去；连续失败 3 次就停手并报错。
    */
   verifyHosts() {
+    if (!this.persistState) return { ok: true, skipped: true, reason: 'not-owner' }
     const expected = this.hosts.addressMap
     const wanted = Object.keys(expected)
     if (wanted.length === 0) return { ok: true, skipped: true }
@@ -537,7 +555,7 @@ export class Accelerator {
     this.record({ event: 'hosts-repair', missing, ok: applied.ok, reason: applied.reason, attempt: this.hostsRepairAttempts })
     if (applied.ok) {
       this.hostsRepairAttempts = 0
-      flushDns()
+      this.flushDnsIfOwner()
     } else this.lastError = `hosts 被改写且无法修复：${applied.reason}`
     return { ok: applied.ok, reason: applied.reason, missing }
   }
@@ -586,6 +604,8 @@ export class Accelerator {
    * 比不加速还糟，而且没有任何提示。所以插件每次装载都要先看一眼状态文件。
    */
   repairIfStale() {
+    /* 不是主人的实例（测试 / 工具）连读都不读，更不会去动系统级的东西。 */
+    if (!this.persistState) return []
     const state = readState()
     const notes = []
     if (!state) {
@@ -595,11 +615,11 @@ export class Accelerator {
       if (this.hosts.isApplied()) {
         this.legacyActive = true
         const removed = this.hosts.remove()
-        if (removed.changed) flushDns()
+        if (removed.changed) this.flushDnsIfOwner()
         notes.push({ action: 'removed-orphan-hosts', ok: removed.ok })
       }
       /* 系统代理里可能也留着我们的 PAC。 */
-      const restored = disableAutoConfig()
+      const restored = this.restoreSysproxy()
       if (restored.changed) notes.push({ action: 'restored-sysproxy', ok: restored.ok })
       return notes
     }
@@ -610,10 +630,10 @@ export class Accelerator {
     this.record({ event: 'repair-stale', previousPid: state.pid, domains: state.domains?.length ?? 0 })
     const removed = this.hosts.remove()
     notes.push({ action: 'removed-stale-hosts', ok: removed.ok, reason: removed.reason })
-    if (removed.changed) flushDns()
-    const restored = disableAutoConfig()
+    if (removed.changed) this.flushDnsIfOwner()
+    const restored = this.restoreSysproxy()
     if (restored.changed) notes.push({ action: 'restored-sysproxy', ok: restored.ok })
-    clearState()
+    this.dropState()
     return notes
   }
 
@@ -625,7 +645,7 @@ export class Accelerator {
   async bootstrap({ pac } = {}) {
     const repaired = this.repairIfStale()
     this.installExitHook()
-    const prefs = readPrefs()
+    const prefs = this.loadPrefs()
     /* 老版本（没有 prefs.json）留下的接管块被清掉了 —— 那说明用户本来就在用，
        升级不该把他的开关悄悄变成「关」。 */
     const wantOn = prefs.enabled === undefined ? this.legacyActive === true : prefs.enabled === true
@@ -657,12 +677,39 @@ export class Accelerator {
         if (this.hosts.isApplied()) this.hosts.remove()
       } catch {}
       try {
-        disableAutoConfig()
+        this.restoreSysproxy()
       } catch {}
       try {
-        clearState()
+        this.dropState()
       } catch {}
     })
+  }
+
+  // ── 系统级共享状态的「主人」门闸 ──────────────────────────────────────────
+  //
+  // 下面这几个包装是**必须**的：prefs.json / active.json / 系统代理 / DNS 缓存
+  // 都属于「一个进程里只能有一个主人」的资源。测试、doctor、bench、live-check
+  // 都会 new 一个 Accelerator —— 没有这道门闸时，它们随手一次 stop() 就能把真插件
+  // 的 prefs 改成 enabled:false（下次 DSH 重启不再自动加速）并删掉崩溃哨兵。
+
+  saveState(value) {
+    if (this.persistState) writeState(value)
+  }
+  dropState() {
+    if (this.persistState) clearState()
+  }
+  savePrefs(value) {
+    if (this.persistState) writePrefs(value)
+  }
+  loadPrefs() {
+    return this.persistState ? readPrefs() : {}
+  }
+  flushDnsIfOwner() {
+    if (this.persistState) flushDns()
+  }
+  restoreSysproxy() {
+    if (!this.persistState) return { ok: true, changed: false, reason: 'not-owner' }
+    return disableAutoConfig()
   }
 
   // ── 开关 ─────────────────────────────────────────────────────────────────
@@ -712,7 +759,7 @@ export class Accelerator {
     }
     if (mode === 'proxy') {
       /* 纯代理模式也允许挂 PAC：那正是「写不了 hosts 也要覆盖浏览器」的用法。 */
-      const wantPacHere = pac === 'on' || (pac === 'auto' && this.pacPolicy === 'on')
+      const wantPacHere = (pac === 'on' || (pac === 'auto' && this.pacPolicy === 'on')) && this.persistState
       if (wantPacHere && report.proxy?.ok) {
         const pacUp = await this.pac.listen()
         report.pac = pacUp.ok ? { ...pacUp, ...enableAutoConfig(pacUp.url) } : pacUp
@@ -744,7 +791,9 @@ export class Accelerator {
       })
     }
 
-    /* 2) optional 域名只有在校验确实找到可用地址时才接管（例如 gist.github.com）。 */
+    /* 2) 自动可选域名：只有在校验确实找到可用地址时才接管（例如 gist.github.com）。
+       `github.io` / `pages.github.com` **不在这里** —— 它们是用户自己的站点，
+       属于「显式 opt-in」，靠 DSH_GITHUB_ACCEL_INCLUDE 才会进来。 */
     const optionalOk = []
     for (const host of this.optional) {
       if (this.excluded.includes(host)) continue
@@ -762,7 +811,16 @@ export class Accelerator {
       else this.record({ event: 'optional-skip', host, why: 'unreachable' })
     }
 
-    const wanted = [...new Set([...this.domains, ...optionalOk])].filter((d) => !this.excluded.includes(d))
+    /* opt-in 域名只有在被显式点名时才进来 —— 它们是用户自己的站点，不替用户做决定。 */
+    const optInOk = []
+    for (const host of this.optIn) {
+      if (this.excluded.includes(host)) continue
+      const ips = await this.table.candidates(host).catch(() => [])
+      optInOk.push(host)
+      this.record({ event: 'optin-include', host, candidates: ips.length })
+    }
+
+    const wanted = [...new Set([...this.domains, ...optionalOk, ...optInOk])].filter((d) => !this.excluded.includes(d))
     const decision = decideHijackDomains({
       domains: wanted,
       excluded: this.excluded,
@@ -774,7 +832,7 @@ export class Accelerator {
 
     if (decision.hijack.length === 0) {
       report.hosts = this.hosts.remove()
-      clearState()
+      this.dropState()
       this.hosts.domains = []
       this.startWatch()
       this.startHealthLoop()
@@ -810,7 +868,7 @@ export class Accelerator {
         report.hosts = { ...this.hosts.apply(), advertised: applicable.length, dropped }
         /* 改完 hosts 一定要清 DNS 缓存：Windows 客户端缓存里 hosts 条目是预载的，
            实测 `github.com` 的 TTL 能到 6.9 天，不清的话「开关点了没反应」。 */
-        if (report.hosts.ok === true) report.hosts.flushed = flushDns()
+        if (report.hosts.ok === true) report.hosts.flushed = this.flushDnsIfOwner()
       } else {
         report.hosts = { ok: false, reason: 'skipped' }
       }
@@ -821,19 +879,19 @@ export class Accelerator {
     /* 5) PAC：hosts 写不进去时浏览器就完全没有覆盖 —— 那时把它打开。
        'auto' 策略下只有 hosts 失败才启用；也允许强制 on/off。 */
     const wantPac = pac === 'on' || (pac === 'auto' && report.hosts?.ok !== true)
-    if (wantPac && report.proxy?.ok) {
+    if (wantPac && report.proxy?.ok && this.persistState) {
       const pacUp = await this.pac.listen()
       report.pac = pacUp.ok ? { ...pacUp, ...enableAutoConfig(pacUp.url) } : pacUp
       this.pacActive = report.pac.ok === true
     } else {
       this.pacActive = false
-      report.pac = { ok: false, reason: pac === 'off' ? 'off' : 'not-needed' }
-      if (pac === 'off') disableAutoConfig()
+      report.pac = { ok: false, reason: wantPac && !this.persistState ? 'not-owner' : pac === 'off' ? 'off' : 'not-needed' }
+      if (pac === 'off') this.restoreSysproxy()
     }
 
     if (report.hosts?.ok === true) {
       this.oursApplied = true
-      writeState({ pid: process.pid, at: new Date().toISOString(), domains: applicable, addresses: this.hosts.addressMap })
+      this.saveState({ pid: process.pid, at: new Date().toISOString(), domains: applicable, addresses: this.hosts.addressMap })
     }
     if (report.pac?.ok === true) this.oursApplied = true
 
@@ -846,7 +904,7 @@ export class Accelerator {
     }
     report.timings.totalMs = Date.now() - t0
     this.lastReport = report
-    writePrefs({ enabled: true, mode, pac })
+    this.savePrefs({ enabled: true, mode, pac })
     log('start done', JSON.stringify(report.timings))
     return report
   }
@@ -867,12 +925,12 @@ export class Accelerator {
     this.pool.close()
     this.table.reset()
     this.pacActive = false
-    clearState()
-    writePrefs({ enabled: false })
-    const restored = disableAutoConfig()
+    this.dropState()
+    this.savePrefs({ enabled: false })
+    const restored = this.restoreSysproxy()
     const removed = removeHosts ? this.hosts.remove() : { ok: true, changed: false }
     /* 撤掉接管同样要清缓存，否则浏览器还会继续往 127.0.0.x 打一段时间。 */
-    if (removed.changed) removed.flushed = flushDns()
+    if (removed.changed) removed.flushed = this.flushDnsIfOwner()
     this.oursApplied = false
     return { hosts: removed, sysproxy: restored }
   }

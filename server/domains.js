@@ -85,28 +85,36 @@ export const DOMAIN_TABLE = [
   { domain: 'ghcr.io', why: '容器 registry' },
   {
     domain: 'gist.github.com',
-    optional: true,
+    optional: 'auto',
     why: '系统 DNS 实测返回 `2001::1`（明显的污染标记）；只有校验确实找到可用地址时才接管，否则放它走直连快速失败',
   },
   {
     domain: 'github.io',
-    optional: true,
-    why: '用户自己的 Pages 站点；接管风险不对等，默认不动',
+    optional: 'optin',
+    why: '用户自己的 Pages 站点；接管风险不对等，**默认不动**，要 DSH_GITHUB_ACCEL_INCLUDE 显式点名才会进来',
   },
   {
     domain: 'pages.github.com',
-    optional: true,
+    optional: 'optin',
     why: '同上，GitHub 自己的 Pages 门户',
   },
 ]
 
-/** 默认接管的域名（不含 optional）。 */
+/** 默认接管的域名（不含任何 optional）。 */
 export const DEFAULT_DOMAINS = DOMAIN_TABLE.filter((e) => !e.optional).map((e) => e.domain)
 
 /**
- * 只有在「运行时校验确实找到了可用地址」时才接管的域名。
- * 它们不出现在任何静态兜底池里。 */
-export const OPTIONAL_DOMAINS = DOMAIN_TABLE.filter((e) => e.optional).map((e) => e.domain)
+ * **自动**可选域名：运行时校验确实找到了可用地址就接管（`gist.github.com`）。
+ * 它们不出现在任何静态兜底池里。
+ */
+export const OPTIONAL_DOMAINS = DOMAIN_TABLE.filter((e) => e.optional === 'auto').map((e) => e.domain)
+
+/**
+ * **显式**可选域名（opt-in）：默认永远不接管，只有 `DSH_GITHUB_ACCEL_INCLUDE`
+ * 点名才会进来。`github.io` / `pages.github.com` 属于这一类 —— 那是用户自己的站点，
+ * 「顺手接管」的风险不对等。
+ */
+export const OPT_IN_DOMAINS = DOMAIN_TABLE.filter((e) => e.optional === 'optin').map((e) => e.domain)
 
 /** 高流量域名：值得占用预热池、值得更勤地重测。 */
 export const HOT_DOMAINS = DOMAIN_TABLE.filter((e) => e.hot).map((e) => e.domain)

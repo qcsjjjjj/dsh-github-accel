@@ -34,6 +34,27 @@
   - 一个字节都没回、拖了 ≥1.5 s → **stall，一次即降权**（15 s 冷却）；
   - 已经传过字节才断（浏览器关页面）→ 软失败，不惩罚。
 
+### 修复 — 工具/测试会污染真插件的持久状态（真实踩过）
+
+- `prefs.json`（上次的开关）与 `active.json`（崩溃哨兵）属于「一个进程里只能有一个主人」
+  的系统级共享资源。而 `test/`、`tools/doctor.mjs`、`tools/bench.mjs`、`tools/live-check.mjs`
+  都会 `new Accelerator(...)` —— 它们随手一次 `stop()` 就会把真插件的
+  `prefs.json` 写成 `enabled:false`、并删掉哨兵。
+  **症状**：跑完一次测试之后，下次 DSH 重启加速器不会自动接回来（「重启一次就失效了」）。
+- 现在 `Accelerator` 新增 `persistState`（**默认 false**），所有对
+  `prefs.json` / `active.json` / 系统代理 / DNS 缓存的读写都走这道门闸；
+  只有插件宿主 `lib/index.js` 显式传 `{ persistState: true }`。
+- 新增回归断言：整轮测试跑完，真插件的状态目录必须**一个字节都没变**。
+
+### 修复 — `github.io` / `pages.github.com` 会被「顺手接管」
+
+- `DOMAIN_TABLE` 里 `optional: true` 曾经同时表达两件事：
+  「校验通过就收」（`gist.github.com`）和「用户自己的站点，默认别动」
+  （`github.io` / `pages.github.com`）。结果是后两个被自动收进了 hosts，
+  与文档写的「默认不接管」矛盾。
+- 现在拆成 `optional: 'auto'` 与 `optional: 'optin'`：只有 `gist.github.com` 是自动的；
+  `github.io` / `pages.github.com` 必须 `DSH_GITHUB_ACCEL_INCLUDE` 点名才会进来。
+
 ### 新增 — 上游「连得上但一声不吭」时换一个并重放 ClientHello
 
 - 这是这条网络上最恶心的失败模式：坏地址不报错、只是**不出声**，浏览器会干等到自己

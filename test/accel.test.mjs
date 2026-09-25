@@ -44,6 +44,32 @@ const SNI_PORT = 18443
 const PROXY_PORT = 19000
 let failures = 0
 
+/*
+ * 快照真插件的状态目录。
+ *
+ * 这一整轮测试会 new 好几个 Accelerator 并调用 stop()/bootstrap()。**它们一个字节
+ * 都不许碰这里** —— 真踩过：测试的 stop() 把 prefs.json 写成 `enabled:false`
+ * （下次 DSH 重启不再自动加速）并删掉了崩溃哨兵 active.json。
+ * 断言放最后一行（见文件末尾）。
+ */
+const STATE_DIR = path.join(process.env.DSH_GITHUB_ACCEL_STATE_DIR ?? path.join(os.homedir(), '.dsh', 'dsh-github-accel'))
+function snapshotDir(dir) {
+  try {
+    const out = {}
+    for (const name of fs.readdirSync(dir)) {
+      try {
+        out[name] = fs.readFileSync(path.join(dir, name), 'utf8')
+      } catch {
+        out[name] = '<unreadable>'
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+const stateBefore = snapshotDir(STATE_DIR)
+
 /** 测试自身的看门狗：任何一处忘了设超时都不许把整轮测试挂死。 */
 const WATCHDOG_MS = Number(process.env.ACCEL_TEST_WATCHDOG_MS ?? 180_000)
 const watchdog = setTimeout(() => {
@@ -724,6 +750,23 @@ check(
   !accel.trace.some((e) => e.event === 'handler-error'),
   accel.trace.find((e) => e.event === 'handler-error')?.why ?? '',
 )
+
+/* ── 回归：库默认不许碰「系统级共享状态」─────────────────────────────────
+ * 这一轮测试 new 了多个 Accelerator 并调用过 stop()。prefs.json（上次的开关）
+ * 与 active.json（崩溃哨兵）是**真插件**的东西，测试一个字节都不许改 ——
+ * 真踩过：测试的 stop() 把 prefs 写成 enabled:false，于是「重启 DSH 之后加速器自己关了」。
+ */
+{
+  const stateAfter = snapshotDir(STATE_DIR)
+  const names = [...new Set([...Object.keys(stateBefore), ...Object.keys(stateAfter)])].sort()
+  const changed = names.filter((n) => stateBefore[n] !== stateAfter[n])
+  check(
+    '整轮测试没有改动真插件的状态文件（prefs / 哨兵）',
+    changed.length === 0,
+    changed.length ? `被改动：${changed.join(', ')}` : `${names.length} 个文件，全部原样`,
+  )
+  check('测试里构造的实例默认不是状态文件的主人', accel.persistState === false, `persistState=${accel.persistState}`)
+}
 
 console.log(failures === 0 ? '\n全部通过 ✅' : `\n${failures} 项失败 ❌`)
 process.exit(failures === 0 ? 0 : 1)

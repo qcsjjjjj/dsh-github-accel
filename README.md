@@ -264,6 +264,13 @@ GET /dsh-github-accel/diagnose
 `gist.github.com`（系统 DNS 实测返回 `2001::1` 这种明显污染值；只有运行时校验确实
 找到可用地址时才接管，否则放它走直连快速失败）。
 
+**显式 opt-in**（默认永远不接管）：`github.io`、`pages.github.com`。
+那是用户自己的站点，「顺手接管」的风险不对等。要收它们得点名：
+
+```powershell
+$env:DSH_GITHUB_ACCEL_INCLUDE = 'github.io,pages.github.com'
+```
+
 ---
 
 ## 环境变量
@@ -273,6 +280,7 @@ GET /dsh-github-accel/diagnose
 | `DSH_GITHUB_ACCEL_AUTO_APP` | `0` | `1` = 自适应（github.com 直连健康就不接管）。默认总是接管 |
 | `DSH_GITHUB_ACCEL_HIJACK_APP` | — | `1`/`0` 强制接管 / 不接管 github.com |
 | `DSH_GITHUB_ACCEL_EXCLUDE` | — | 逗号分隔，永不接管的域名 |
+| `DSH_GITHUB_ACCEL_INCLUDE` | — | 逗号分隔，**显式 opt-in** 的域名（目前只认 `github.io` / `pages.github.com`） |
 | `DSH_GITHUB_ACCEL_IPS` | — | 手工钉住地址：`github.com=1.2.3.4,ghcr.io=...` |
 | `DSH_GITHUB_ACCEL_DOH` | 空 | 可选 DoH 端点（只作为 DNS 明显被污染时的补充来源） |
 | `DSH_GITHUB_ACCEL_POOL` | `1` | `0` 关闭预热池 |
