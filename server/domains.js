@@ -53,7 +53,7 @@ export function loopbackFor(index) {
  * why 字段是给后来者看的：改这张表之前先读它。
  *
  * 关于 **AAAA / IPv6 黑洞**（2026-09-25 逐域名实测 `Resolve-DnsName -Type AAAA -DnsOnly`）：
- * 本机有全局 IPv6（CERNET `2001:250:405:500::/64`），而 **4 条 GitHub 的 AAAA 全部 timeout**；
+ * 本机有**全局 IPv6 地址**（RA 派生的 /64），而 **4 条 GitHub 的 AAAA 全部 timeout**；
  * Windows 默认前缀策略里 `::/0`(40) 优先于 `::ffff:0:0/96`(35)，也就是**浏览器会优先试 IPv6**。
  * 一旦某个域名被写进 hosts，Windows 解析器就只给 IPv4 答案、AAAA 直接被抑制（实测
  * `github.com` 在 hosts 里时 `AAAA=[]`）—— 这等于顺手把 IPv6 黑洞绕过去了。
