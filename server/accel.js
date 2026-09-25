@@ -254,15 +254,19 @@ export class Accelerator {
     this.healthIntervalMs = Number(options.healthIntervalMs ?? process.env.DSH_GITHUB_ACCEL_HEALTH_MS ?? 90_000)
     this.pacPolicy = options.pac ?? process.env.DSH_GITHUB_ACCEL_PAC ?? 'auto'
 
-    /* 上游侧的三个时间预算（详见 server/tunnel.js 的 connectUpstream 注释）：
+    /* 上游侧的时间预算（详见 server/tunnel.js 的 connectUpstream 注释）：
        stallMs              上游多久不回一个字节就判定为黑洞地址（用于降权）
        firstByteMs          上游多久不回第一个字节就**换一个并重放 ClientHello**
        maxUpstreamAttempts  一条客户端连接最多试几个上游
-       connectDeadlineMs    一条客户端连接在上游侧的总预算 */
+       connectDeadlineMs    一条客户端连接在上游侧的总预算
+
+       ⚠️ 尝试次数和候选池大小是**乘法关系**：一次 raceConnect 自己就会把候选从头扫到尾
+       （受 raceTotalMs 限制）。池子现在有 12 个候选，一次就可能花满 4 s，再乘 3 次就是 12 s
+       —— 那是「GitHub 不通时浏览器干等」的新来源。所以：总共只给两次尝试，总预算压在 5 s。 */
     this.stallMs = Number(options.stallMs ?? process.env.DSH_GITHUB_ACCEL_STALL_MS ?? 1500)
     this.firstByteMs = Number(options.firstByteMs ?? process.env.DSH_GITHUB_ACCEL_FIRST_BYTE_MS ?? 1500)
-    this.maxUpstreamAttempts = Number(options.maxUpstreamAttempts ?? process.env.DSH_GITHUB_ACCEL_UPSTREAM_ATTEMPTS ?? 3)
-    this.connectDeadlineMs = Number(options.connectDeadlineMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS ?? 8000)
+    this.maxUpstreamAttempts = Number(options.maxUpstreamAttempts ?? process.env.DSH_GITHUB_ACCEL_UPSTREAM_ATTEMPTS ?? 2)
+    this.connectDeadlineMs = Number(options.connectDeadlineMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS ?? 5000)
 
     this.tunnel = new TunnelServer({
       openUpstream: (host, opts) => this.openUpstream(host, opts),

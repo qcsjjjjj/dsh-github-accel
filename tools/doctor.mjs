@@ -78,10 +78,15 @@ say('\n== 4. 上游可达性（端到端：校验证书 + 真发一次请求）'
 const table = new Accelerator({ watchIntervalMs: 0, healthIntervalMs: 0 }).table
 
 for (const host of targets) {
-  const ips = (await table.candidates(host)).slice(0, 4)
+  const all = await table.candidates(host)
+  /* 只探前 N 个：候选池现在有十几个，全探一轮要好几分钟。
+     但**必须把总数说出来** —— 否则「1/4 可用」会让人以为池子里只有 4 个、快要没救了，
+     而实际上隧道会一直往下扫到第 12 个。 */
+  const PROBE = Number(process.env.DOCTOR_PROBE ?? 8)
+  const ips = all.slice(0, PROBE)
   if (ips.length === 0) {
     say(`  ${host.padEnd(38)} 没有候选地址（DNS 与备用池都没给）`)
-    out.domains.push({ host, ips, good: [] })
+    out.domains.push({ host, ips, good: [], total: 0 })
     continue
   }
   const results = await Promise.all(ips.map((ip) => validateEndpoint(ip, host, { timeoutMs: 7000 }).catch(() => undefined)))
@@ -90,11 +95,11 @@ for (const host of targets) {
     if (!r) return
     if (r.ok) good.push({ ip: ips[i], tlsMs: r.tlsMs, ttfbMs: r.ttfbMs, status: r.status })
   })
-  out.domains.push({ host, ips, good })
+  out.domains.push({ host, ips, good, total: all.length })
   const best = good.reduce((a, b) => (a === null || b.tlsMs < a.tlsMs ? b : a), null)
   say(
-    `  ${host.padEnd(38)} ${good.length}/${ips.length} 可用` +
-      (best ? `  最快 ${best.ip} tls=${best.tlsMs}ms ttfb=${best.ttfbMs}ms http=${best.status}` : '  ← 全部不可用'),
+    `  ${host.padEnd(38)} 探了 ${good.length}/${ips.length} 个可用（候选池共 ${all.length} 个）` +
+      (best ? `  最快 ${best.ip} tls=${best.tlsMs}ms ttfb=${best.ttfbMs}ms http=${best.status}` : '  ← 前几个全不可用'),
   )
 }
 
