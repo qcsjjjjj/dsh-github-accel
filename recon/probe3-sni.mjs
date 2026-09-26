@@ -10,7 +10,10 @@
  */
 import tls from 'node:tls'
 
-const IPS = ['20.205.243.166', '20.205.243.168', '140.82.113.4', '140.82.112.4', '20.205.243.165']
+/* 挑的是「同一批 IP 上、不同域名表现差异最大」的几个：
+   140.82.116.9 服务 codeload、.5/.6 服务 api、.3 服务 api/raw —— 都是当前活着的那一批。
+   如果同一个 IP 换个 SNI 就通/不通，那就是 **SNI 维度**的封锁。 */
+const IPS = ['140.82.116.9', '140.82.116.5', '140.82.116.3', '140.82.113.4', '20.205.243.166', '20.207.73.82']
 const SNIS = ['github.com', 'api.github.com', 'codeload.github.com', 'github.githubassets.com', 'raw.githubusercontent.com']
 
 /** 到 ip 用 sni 握手，再发一个 HEAD。返回握手与响应结果。 */

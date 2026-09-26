@@ -79,10 +79,11 @@ const table = new Accelerator({ watchIntervalMs: 0, healthIntervalMs: 0 }).table
 
 for (const host of targets) {
   const all = await table.candidates(host)
-  /* 只探前 N 个：候选池现在有十几个，全探一轮要好几分钟。
-     但**必须把总数说出来** —— 否则「1/4 可用」会让人以为池子里只有 4 个、快要没救了，
-     而实际上隧道会一直往下扫到第 12 个。 */
-  const PROBE = Number(process.env.DOCTOR_PROBE ?? 8)
+  /* 探整张候选表（有上限，免得一个域名探几分钟）。**必须把池子总数和
+     「第几个才可用」都说出来**：
+       - 只说「0/8 可用」会让人以为域名废了，而实际上隧道会一路扫到第 12 个；
+       - 「第 9 个才可用」本身就是一个重要信号 —— 说明排序没能跟上网络的变化。 */
+  const PROBE = Math.min(all.length, Number(process.env.DOCTOR_PROBE ?? 12))
   const ips = all.slice(0, PROBE)
   if (ips.length === 0) {
     say(`  ${host.padEnd(38)} 没有候选地址（DNS 与备用池都没给）`)
@@ -93,13 +94,16 @@ for (const host of targets) {
   const good = []
   results.forEach((r, i) => {
     if (!r) return
-    if (r.ok) good.push({ ip: ips[i], tlsMs: r.tlsMs, ttfbMs: r.ttfbMs, status: r.status })
+    if (r.ok) good.push({ ip: ips[i], tlsMs: r.tlsMs, ttfbMs: r.ttfbMs, status: r.status, index: i + 1 })
   })
   out.domains.push({ host, ips, good, total: all.length })
   const best = good.reduce((a, b) => (a === null || b.tlsMs < a.tlsMs ? b : a), null)
+  const firstOk = good.length ? Math.min(...good.map((g) => g.index)) : null
   say(
     `  ${host.padEnd(38)} 探了 ${good.length}/${ips.length} 个可用（候选池共 ${all.length} 个）` +
-      (best ? `  最快 ${best.ip} tls=${best.tlsMs}ms ttfb=${best.ttfbMs}ms http=${best.status}` : '  ← 前几个全不可用'),
+      (best
+        ? `  最快 ${best.ip} tls=${best.tlsMs}ms  ${firstOk > 3 ? `⚠️ 第 ${firstOk} 个候选才有可用的（排序落后了）` : ''}`
+        : '  ← 整张候选表都不可用'),
   )
 }
 

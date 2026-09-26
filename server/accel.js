@@ -221,19 +221,35 @@ export class Accelerator {
       fallbacks: options.fallbacks ?? FALLBACK_IPS,
       overrides: options.overrides ?? parseOverrides(process.env.DSH_GITHUB_ACCEL_IPS),
       ttlMs: options.ipTtlMs ?? IP_TTL_MS,
-      validateTtlMs: options.validateTtlMs ?? VALIDATE_TTL_MS,
+      /* 「已验证」的有效期。短一点：网络是分钟级抖动的，10 分钟前的结论会压着
+         现在其实更好的地址。 */
+      validateTtlMs: options.validateTtlMs ?? Number(process.env.DSH_GITHUB_ACCEL_VALIDATE_TTL_MS ?? 300_000),
+      /* 坏地址冷却。**调短了**：冷却中的地址会被排到最后，而过早排后等于把一个
+         可能还活着的地址从候选表里挪开 —— 那是拿成功率换速度，与本项目的默认取向相反。 */
+      cooldownBaseMs: options.cooldownBaseMs ?? Number(process.env.DSH_GITHUB_ACCEL_COOLDOWN_MS ?? 15_000),
+      cooldownMaxMs: options.cooldownMaxMs ?? Number(process.env.DSH_GITHUB_ACCEL_COOLDOWN_MAX_MS ?? 120_000),
       dohEndpoint: options.dohEndpoint ?? process.env.DSH_GITHUB_ACCEL_DOH ?? '',
     })
 
-    /* 单个候选地址的连接超时。**必须短**：GitHub 的 A 记录里常有在特定网络下不可达的地址
-       （实测 github.com 的 5 个候选里 3 个连得上但不服务内容），而我们只在「有候选失败时」
-       才顶上下一个。超时越长，坏候选把我们拖着的时间就越长。
-       实测数据支撑：TCP 连接 210–305 ms，所以 1200 ms 已经是 4 倍余量。 */
-    this.connectTimeoutMs = Number(options.connectTimeoutMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_TIMEOUT_MS ?? 1200)
-    /* 同时竞速的候选数。3 个而不是 2 个：实测 p95 就是被「前两个都坏」拖到 1.5–2.5 s 的。 */
-    this.raceWidth = Number(options.raceWidth ?? process.env.DSH_GITHUB_ACCEL_RACE_WIDTH ?? 3)
-    this.raceTotalMs = Number(options.raceTotalMs ?? process.env.DSH_GITHUB_ACCEL_RACE_TOTAL_MS ?? 4000)
-    this.staggerMs = Number(options.staggerMs ?? process.env.DSH_GITHUB_ACCEL_RACE_STAGGER_MS ?? 200)
+    /*
+     * ── 默认取向：**成功率优先，其次才是速度** ──────────────────────────────
+     *
+     * 实测背景：这条网络对 GitHub 的封锁是**分钟级抖动**的，而且「哪些地址活着」
+     * 每次都不一样（同一批地址十分钟内 200 → timeout → 200）。在这种对手面前，
+     * 「快」是靠不住的：1.2 s 就把一个其实 1.6 s 能连上的候选砍掉，换来的只是
+     * 「更快地失败」。所以下面这些值都往「多试几个、多等一会儿、别轻易放弃」调。
+     *
+     * 浏览器自己会等 30 s 以上；在 10 s 内成功，严格优于在 5 s 内放弃。
+     * 想换回速度优先：把下面几个环境变量调小即可（见 README 的表格）。
+     */
+    /* 单个候选的连接超时。实测见过 1174/1186 ms 的连接，拥塞时更久 ——
+       1200 ms 会把本来能成功的候选切掉。3000 ms 是「宁可等，不要误判」。 */
+    this.connectTimeoutMs = Number(options.connectTimeoutMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_TIMEOUT_MS ?? 3000)
+    /* 同时竞速的候选数。放宽到 6：靠「铺开抢」找到活的那个，而不是靠「等超时」逐个试。 */
+    this.raceWidth = Number(options.raceWidth ?? process.env.DSH_GITHUB_ACCEL_RACE_WIDTH ?? 6)
+    /* 一轮竞速的总预算。池子有 12–16 个候选，一轮要能扫得完。 */
+    this.raceTotalMs = Number(options.raceTotalMs ?? process.env.DSH_GITHUB_ACCEL_RACE_TOTAL_MS ?? 8000)
+    this.staggerMs = Number(options.staggerMs ?? process.env.DSH_GITHUB_ACCEL_RACE_STAGGER_MS ?? 150)
 
     /* 预热池：热域名常备空闲上游连接，省掉「客户端连上后才开始连上游」的那一个 RTT。
        TTL 要短：上游会主动关掉空闲连接，而 FIN 还没被我们处理到的那一小段窗口里，
@@ -251,7 +267,11 @@ export class Accelerator {
     this.hijackApp = options.hijackApp ?? (hijackAppEnv === undefined ? undefined : hijackAppEnv === '1')
     this.directProbeTimeoutMs = Number(options.directProbeTimeoutMs ?? process.env.DSH_GITHUB_ACCEL_DIRECT_TIMEOUT_MS ?? 4000)
     this.watchIntervalMs = Number(options.watchIntervalMs ?? process.env.DSH_GITHUB_ACCEL_WATCH_MS ?? 60_000)
-    this.healthIntervalMs = Number(options.healthIntervalMs ?? process.env.DSH_GITHUB_ACCEL_HEALTH_MS ?? 90_000)
+    /* 复检间隔。网络是**分钟级**抖动的，排序要跟得上 —— 90 s 太慢，45 s 合适。 */
+    this.healthIntervalMs = Number(options.healthIntervalMs ?? process.env.DSH_GITHUB_ACCEL_HEALTH_MS ?? 45_000)
+    /* 每轮复检在候选表上滑动的窗口大小（见 validate() 的注释）。 */
+    this.validateWindow = Number(options.validateWindow ?? process.env.DSH_GITHUB_ACCEL_VALIDATE_WINDOW ?? 6)
+    this.validateCursor = new Map()
     this.pacPolicy = options.pac ?? process.env.DSH_GITHUB_ACCEL_PAC ?? 'auto'
 
     /* 上游侧的时间预算（详见 server/tunnel.js 的 connectUpstream 注释）：
@@ -260,13 +280,16 @@ export class Accelerator {
        maxUpstreamAttempts  一条客户端连接最多试几个上游
        connectDeadlineMs    一条客户端连接在上游侧的总预算
 
-       ⚠️ 尝试次数和候选池大小是**乘法关系**：一次 raceConnect 自己就会把候选从头扫到尾
-       （受 raceTotalMs 限制）。池子现在有 12 个候选，一次就可能花满 4 s，再乘 3 次就是 12 s
-       —— 那是「GitHub 不通时浏览器干等」的新来源。所以：总共只给两次尝试，总预算压在 5 s。 */
-    this.stallMs = Number(options.stallMs ?? process.env.DSH_GITHUB_ACCEL_STALL_MS ?? 1500)
-    this.firstByteMs = Number(options.firstByteMs ?? process.env.DSH_GITHUB_ACCEL_FIRST_BYTE_MS ?? 1500)
+       这里的取向同样是**成功率优先**：
+         · 首字节看门狗从 1.5 s 放宽到 3 s —— 拥塞时 1.5 s 会把一条其实能用的上游丢掉；
+         · stallMs 提到 2.5 s 与之对齐，免得把「慢但好」的地址判成黑洞；
+         · 总预算 5 s → 12 s。浏览器自己会等 30 s 以上，12 s 内成功严格优于 5 s 内放弃；
+         · 尝试次数仍然是 2：一次 raceConnect 自己就会扫完整个候选池（现在宽 6、
+           预算 8 s），再盲目乘更多次只会把干等时间放大。 */
+    this.stallMs = Number(options.stallMs ?? process.env.DSH_GITHUB_ACCEL_STALL_MS ?? 2500)
+    this.firstByteMs = Number(options.firstByteMs ?? process.env.DSH_GITHUB_ACCEL_FIRST_BYTE_MS ?? 3000)
     this.maxUpstreamAttempts = Number(options.maxUpstreamAttempts ?? process.env.DSH_GITHUB_ACCEL_UPSTREAM_ATTEMPTS ?? 2)
-    this.connectDeadlineMs = Number(options.connectDeadlineMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS ?? 5000)
+    this.connectDeadlineMs = Number(options.connectDeadlineMs ?? process.env.DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS ?? 12_000)
 
     this.tunnel = new TunnelServer({
       openUpstream: (host, opts) => this.openUpstream(host, opts),
@@ -460,17 +483,37 @@ export class Accelerator {
 
   /**
    * 后台端到端校验：**这是「这个地址到底能不能用」的唯一可信来源**。
-   * 只对热域名和最近出过问题的域名跑，避免打爆上游。
+   *
+   * ## 为什么要**轮转**而不是只校验前几个（这是「成功率优先」的关键）
+   *
+   * 只校验排序最前面的 N 个，会让**后面的候选永远不被重新测**：一旦前几名被
+   * 整段挡掉，候选表就还把它们排在最前面，于是每个新连接都要先白撞若干个死地址，
+   * 才轮到那个其实活着的。
+   *
+   * 实测过这个症状：隧道的 curl 能拿到 `github.com` 200，而 doctor 同时报
+   * 「前 8 个候选全不可用」—— 活的那个排在 8 名之后。
+   *
+   * 所以每轮 = **当前最好的 2 个** ∪ **一个在整张表上滑动的窗口**。
+   * 几轮下来整张池子都会被重新测过，排序才会反映现实。
    */
   async validate(hosts = HOT_DOMAINS) {
     const results = []
+    const window = Math.max(1, this.validateWindow)
     for (const host of hosts) {
       if (this.excluded.includes(host)) continue
-      const ips = (await this.table.candidates(host)).slice(0, 3)
-      if (ips.length === 0) {
+      const all = await this.table.candidates(host)
+      if (all.length === 0) {
         results.push({ host, okCount: 0, total: 0, reason: 'no-candidates' })
         continue
       }
+      /* 当前最好的两个每轮必测（它们是连接路径的首选，新鲜度最重要） */
+      const head = all.slice(0, Math.min(2, all.length))
+      const cursor = (this.validateCursor.get(host) ?? 0) % all.length
+      const slice = []
+      for (let i = 0; i < Math.min(window, all.length); i += 1) slice.push(all[(cursor + i) % all.length])
+      this.validateCursor.set(host, (cursor + window) % all.length)
+      const ips = [...new Set([...head, ...slice])]
+      /* eslint-disable no-await-in-loop */
       const settled = await Promise.all(ips.map((ip) => validateEndpoint(ip, host).catch(() => undefined)))
       let okCount = 0
       settled.forEach((r, i) => {
@@ -479,7 +522,7 @@ export class Accelerator {
         this.table.recordValidation(host, ips[i], r)
         if (r.ok) okCount += 1
       })
-      results.push({ host, okCount, total: ips.length, ips })
+      results.push({ host, okCount, total: ips.length, ips, pool: all.length, cursor })
     }
     return results
   }

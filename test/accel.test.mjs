@@ -501,6 +501,12 @@ console.log('\n== 9. 隧道 socket 不泄漏（回归 B1）')
   const openedSockets = []
   const tunnel = new TunnelServer({
     record: (e) => records.push(e),
+    /* 显式指定时间预算，**不依赖生产默认值** —— 生产默认是「成功率优先」
+       （stallMs 2.5s / firstByteMs 3s），测试要的是快速且确定。 */
+    stallMs: 300,
+    firstByteMs: 400,
+    maxUpstreamAttempts: 2,
+    connectDeadlineMs: 3000,
     openUpstream: async () => {
       const socket = net.connect(upPort, '127.0.0.1')
       await new Promise((resolve, reject) => {

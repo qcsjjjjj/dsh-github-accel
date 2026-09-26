@@ -275,6 +275,11 @@ $env:DSH_GITHUB_ACCEL_INCLUDE = 'github.io,pages.github.com'
 
 ## 环境变量
 
+> **默认取向是「成功率优先，其次才是速度」。** 这条网络对 GitHub 的封锁是分钟级抖动的，
+> 在这种对手面前「快」是靠不住的——1.2s 就把一个其实 1.6s 能连上的候选砍掉，
+> 换来的只是「更快地失败」。浏览器自己会等 30s 以上，**10s 内成功严格优于 5s 内放弃**。
+> 想换回速度优先，把下面的超时/预算调小即可。
+
 | 变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `DSH_GITHUB_ACCEL_AUTO_APP` | `0` | `1` = 自适应（github.com 直连健康就不接管）。默认总是接管 |
@@ -285,15 +290,17 @@ $env:DSH_GITHUB_ACCEL_INCLUDE = 'github.io,pages.github.com'
 | `DSH_GITHUB_ACCEL_DOH` | 空 | 可选 DoH 端点（只作为 DNS 明显被污染时的补充来源） |
 | `DSH_GITHUB_ACCEL_POOL` | `1` | `0` 关闭预热池 |
 | `DSH_GITHUB_ACCEL_POOL_KEEP` / `_TTL_MS` | `2` / `5000` | 预热池每个域名的条数与存活时间 |
-| `DSH_GITHUB_ACCEL_RACE_WIDTH` | `3` | 同时竞速的候选数 |
-| `DSH_GITHUB_ACCEL_CONNECT_TIMEOUT_MS` | `1200` | 单个候选的连接超时 |
-| `DSH_GITHUB_ACCEL_RACE_TOTAL_MS` | `4000` | 一轮竞速的总预算 |
-| `DSH_GITHUB_ACCEL_STALL_MS` | `1500` | 上游多久不回一个字节就判定为黑洞（降权） |
-| `DSH_GITHUB_ACCEL_FIRST_BYTE_MS` | `1500` | 上游多久不回第一个字节就**换一个上游并重放 ClientHello**（`0` 关掉） |
-| `DSH_GITHUB_ACCEL_UPSTREAM_ATTEMPTS` | `3` | 一条客户端连接最多试几个上游 |
-| `DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS` | `8000` | 一条客户端连接在上游侧的总预算 |
-| `DSH_GITHUB_ACCEL_COOLDOWN_MS` / `_MAX_MS` | `30000` / `300000` | 坏地址冷却的基数与上限 |
-| `DSH_GITHUB_ACCEL_HEALTH_MS` | `90000` | 后台端到端复检间隔 |
+| `DSH_GITHUB_ACCEL_RACE_WIDTH` | `6` | 同时竞速的候选数（靠铺开抢，而不是等超时逐个试） |
+| `DSH_GITHUB_ACCEL_CONNECT_TIMEOUT_MS` | `3000` | 单个候选的连接超时 |
+| `DSH_GITHUB_ACCEL_RACE_TOTAL_MS` | `8000` | 一轮竞速的总预算（要能扫完 12–16 个候选） |
+| `DSH_GITHUB_ACCEL_STALL_MS` | `2500` | 上游多久不回一个字节就判定为黑洞（降权） |
+| `DSH_GITHUB_ACCEL_FIRST_BYTE_MS` | `3000` | 上游多久不回第一个字节就**换一个上游并重放 ClientHello**（`0` 关掉） |
+| `DSH_GITHUB_ACCEL_UPSTREAM_ATTEMPTS` | `2` | 一条客户端连接最多试几个上游 |
+| `DSH_GITHUB_ACCEL_CONNECT_DEADLINE_MS` | `12000` | 一条客户端连接在上游侧的总预算 |
+| `DSH_GITHUB_ACCEL_COOLDOWN_MS` / `_MAX_MS` | `15000` / `120000` | 坏地址冷却的基数与上限（调短 = 少把可能还活着的地址排除在外） |
+| `DSH_GITHUB_ACCEL_HEALTH_MS` | `45000` | 后台端到端复检间隔 |
+| `DSH_GITHUB_ACCEL_VALIDATE_WINDOW` | `6` | 每轮复检在候选表上滑动的窗口（见下） |
+| `DSH_GITHUB_ACCEL_VALIDATE_TTL_MS` | `300000` | 「已验证」的有效期 |
 | `DSH_GITHUB_ACCEL_WATCH_MS` | `60000` | 自适应模式下的直连复检间隔 |
 | `DSH_GITHUB_ACCEL_PAC` | `auto` | `auto` / `on` / `off` |
 | `DSH_GITHUB_ACCEL_LOOPBACK_PREFIX` | `127.0.0.` | 回环地址前缀（个别安全软件拦非 `.1` 回环时可改） |
